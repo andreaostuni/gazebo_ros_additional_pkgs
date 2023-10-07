@@ -1,60 +1,117 @@
+// Copyright 2023 Andrea Ostuni - PIC4SeR
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+
+
 #include "gazebo_ros_collision/gazebo_ros_collision.hpp"
 
 namespace gazebo_ros_collision
 {
 
-CollisionPlugin::CollisionPlugin() : gazebo::SensorPlugin()
+class CollisionPluginPrivate
+{
+public:
+  /**
+   * @brief OnUpdate callback that publishes the contact state.
+   */
+  void OnUpdate();
+
+  /**
+   * @brief Pointer to the contact sensor.
+   */
+  gazebo::sensors::ContactSensorPtr parent_sensor_;
+
+  /**
+   * @brief Connection that maintains a link between the contact sensor's
+   *  updated signal and the OnUpdate callback.
+   */
+  gazebo::event::ConnectionPtr update_connection_;
+
+  /**
+   * @brief pointer to the GazeboROS node.
+   */
+  gazebo_ros::Node::SharedPtr node_{nullptr};
+
+  /**
+   * @brief Frame name, to be used by TF.
+   */
+  std::string frame_name_;
+
+  /**
+   * @brief Graund name, to be filtered from contact states.
+   */
+  std::string terrain_name_;
+
+  /**
+   * @brief ROS2 publisher for the contact topic.
+   */
+  rclcpp::Publisher<gazebo_collision_msgs::msg::Collision>::SharedPtr pub_; //gazeboROS
+};
+
+CollisionPlugin::CollisionPlugin()
+: impl_(std::make_unique<CollisionPluginPrivate>())
 {
 }
 
 CollisionPlugin::~CollisionPlugin()
 {
+  impl_->node_.reset();
 }
 
 void CollisionPlugin::Load(gazebo::sensors::SensorPtr _sensor, sdf::ElementPtr _sdf)
 {
   // Initialize ROS node
-  node_ = gazebo_ros::Node::Get(_sdf);
-  RCLCPP_INFO(node_->get_logger(), "CollisionPlugin: Loading plugin.");
+  impl_->node_ = gazebo_ros::Node::Get(_sdf);
+  RCLCPP_INFO(impl_->node_->get_logger(), "CollisionPlugin: Loading plugin.");
   // Get the parent sensor.
-  this->parent_sensor_ = std::dynamic_pointer_cast<gazebo::sensors::ContactSensor>(_sensor);
-  if(!this->parent_sensor_){
-    RCLCPP_ERROR(node_->get_logger(), "ContactPlugin requires a ContactSensor.");
-    node_.reset();
+  impl_->parent_sensor_ = std::dynamic_pointer_cast<gazebo::sensors::ContactSensor>(_sensor);
+  if (!impl_->parent_sensor_) {
+    RCLCPP_ERROR(impl_->node_->get_logger(), "ContactPlugin requires a ContactSensor.");
+    impl_->node_.reset();
     return;
   }
 
   // Get QoS profiles
-  const gazebo_ros::QoS & qos = this->node_->get_qos();
+  const gazebo_ros::QoS & qos = impl_->node_->get_qos();
 
   // Contact state publisher
-  // pub_ = this->node_->create_publisher<gazebo_msgs::msg::ContactsState>(
-  //   "bumper_states", qos.get_publisher_qos("bumper_states", rclcpp::SensorDataQoS().reliable()));
-  pub_ = this->node_->create_publisher<gazebo_collision_msgs::msg::Collision>(
+  impl_->pub_ = impl_->node_->create_publisher<gazebo_collision_msgs::msg::Collision>(
     "collision", qos.get_publisher_qos("collision", rclcpp::SensorDataQoS().reliable()));
 
   RCLCPP_INFO(
-    node_->get_logger(), "Publishing contact states to [%s]",
-    pub_->get_topic_name());
-  
+    impl_->node_->get_logger(), "Publishing contact states to [%s]",
+    impl_->pub_->get_topic_name());
+
   // Get tf frame for output
-  frame_name_ = _sdf->Get<std::string>("frame_name", "world").first;
-  
-  terrain_name_ = _sdf->Get<std::string>("terrain_name", "terrain").first;
+  impl_->frame_name_ = _sdf->Get<std::string>("frame_name", "world").first;
 
-  this->update_connection_ = this->parent_sensor_->ConnectUpdated(
-    std::bind(&CollisionPlugin::OnUpdate, this));
+  impl_->terrain_name_ = _sdf->Get<std::string>("terrain_name", "terrain").first;
 
-  this->parent_sensor_->SetActive(true);
+  impl_->update_connection_ = impl_->parent_sensor_->ConnectUpdated(
+    std::bind(&CollisionPluginPrivate::OnUpdate, impl_.get()));
+
+  impl_->parent_sensor_->SetActive(true);
 
 }
 
-void CollisionPlugin::OnUpdate()
+void CollisionPluginPrivate::OnUpdate()
 {
-  // jetson_dqn::Contact msg;
-  // msg.header.stamp = ros::Time::now();
-  // msg.header.frame_id = this->parentSensor->ParentName();
-  // msg.header.frame_id = msg.header.frame_id.substr(msg.header.frame_id.find("::") + 2);
   std::vector<std::string> objs_hit;
 
   gazebo::msgs::Contacts contacts;
@@ -63,47 +120,21 @@ void CollisionPlugin::OnUpdate()
   msg.header.frame_id = frame_name_;
   msg.header.stamp = node_->now();
 
-
-  for (unsigned int i = 0; i < contacts.contact_size(); ++i)
-  {
-    std::string obj_name = contacts.contact(i).collision2();
-
-    // Remove the namespace from the object name
-    // while (true)
-    // {
-    //   if (obj_name.find(std::string("::")) != std::string::npos)
-    //   {
-    //     obj_name = obj_name.substr(obj_name.find("::") + 2);
-    //   }
-    //   else
-    //   {
-    //     break;
-    //   }
-    // }
+  // Remove the terrain from the collision list
+  std::for_each(
+    contacts.contact().begin(), contacts.contact().end(),
+    [&](gazebo::msgs::Contact contact) {
+      if (contact.collision2().find(terrain_name_) == std::string::npos) {
+        objs_hit.push_back(contact.collision2());
+      }
+    });
 
 
-    // Remove the terrain from the collision list
-    // use copy_if() to remove the terrain from the list and lamda function to check if is already in the list
-
-    if (obj_name.find(terrain_name_) != std::string::npos)
-    {
-      continue;
-    }
-
-    // Add the object to the list if it is not already there
-    if (std::find(objs_hit.begin(), objs_hit.end(), obj_name) == objs_hit.end())
-    {
-      objs_hit.push_back(obj_name);
-    }
+  if (!objs_hit.empty()) {
+    // insert the collision list into the message and publish it
+    std::unique_copy(objs_hit.begin(), objs_hit.end(), std::back_inserter(msg.objects_hit));
+    pub_->publish(msg);
   }
-
-  if (objs_hit.size() > 0)
-  {
-    msg.objects_hit = objs_hit;
-    // auto contact_state_msg = gazebo_ros::Convert<gazebo_msgs::msg::ContactsState>(contacts);
-    // contact_state_msg.header.frame_id = frame_name_;
-  }
-  pub_->publish(msg);  
 
   return;
 }

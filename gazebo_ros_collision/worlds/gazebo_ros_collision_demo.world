@@ -112,9 +112,9 @@
           <plugin name="collision_sensor" filename="libgazebo_ros_collision.so">
             <ros>
               <namespace>demo</namespace>
-              <remapping>collision:=collisions</remapping>
             </ros>
             <frame_name>world</frame_name>
+            <terrain_name>ground_plane</terrain_name>
           </plugin>
         </sensor>
       </link>
