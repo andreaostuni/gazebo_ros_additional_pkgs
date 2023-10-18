@@ -22,7 +22,8 @@ in your gazebo.xacro file. The reference frame should be the global frame of you
 
 Setting the output topic and update rate are optional.
 
-
+``` txt
 Msg file: Contact.msg
 Header header
 string[] objects_hit
+```
