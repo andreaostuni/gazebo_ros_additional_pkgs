@@ -148,10 +148,13 @@
       <!-- Update rate in Hz, defaults to 0.0, which means as fast as possible -->
       <update_rate>10</update_rate>
 
+      <min_range>0.0</min_range>
+      <max_range>3.0</max_range>
+
       <!-- Noise parameters -->
       <!-- Standard deviation of the noise to be added to the landmark measurements. -->
-      <gaussian_noise>0.0</gaussian_noise>
-
+      <gaussian_noise_range>0.0</gaussian_noise_range>
+      <gaussian_noise_bearing>0.0</gaussian_noise_bearing>
 
     </plugin>
 

@@ -88,14 +88,28 @@ public:
   double update_rate_{0.0};
 
   /**
-   * @brief Gaussian noise to be added to the reported velocities.
+   * @brief Gaussian noise to be added to the range measurements.
    */
-  double gaussian_noise_;
+  double gaussian_noise_range_{0.0};
+
+  /**
+   * @brief Gaussian noise to be added to the bearing measurements.
+   */
+  double gaussian_noise_bearing_{0.0};
+
+  /**
+    * @brief  min range of the sensor (defaults to 0m)
+  */
+  double min_range_{0.0};
+  
+  /**
+   * @brief  max range of the sensor (defaults to 10m)
+  */
+  double max_range_{10.0};
 
   /**
    * @brief  Publish landmark poses as ranges and bearings.
    */
-  
   std::shared_ptr<rclcpp::Publisher<LandmarkMeasureArray>> pub_;
 };
 
@@ -160,6 +174,18 @@ void GazeboLandmarks::Load(gazebo::physics::WorldPtr _world, sdf::ElementPtr sdf
     return;
   }
 
+  if(!sdf->HasElement("min_range")) {
+    RCLCPP_DEBUG(impl_->ros_node_->get_logger(), "Missing <min_range>, defaults to 0.0");
+  } else {
+    impl_->min_range_ = sdf->GetElement("min_range")->Get<double>();
+  }
+
+  if(!sdf->HasElement("max_range")) {
+    RCLCPP_DEBUG(impl_->ros_node_->get_logger(), "Missing <max_range>, defaults to 10.0");
+  } else {
+    impl_->max_range_ = sdf->GetElement("max_range")->Get<double>();
+  }
+
   if(!sdf->HasElement("robot_frame_name")) {
     RCLCPP_WARN(impl_->ros_node_->get_logger(), "Missing <robot_frame_name>, defaults to base_link");
     return;
@@ -209,11 +235,18 @@ void GazeboLandmarks::Load(gazebo::physics::WorldPtr _world, sdf::ElementPtr sdf
     impl_->ros_node_->get_logger(), "Publishing on topic [%s]", impl_->topic_name_.c_str());
 
 
-  if (!sdf->HasElement("gaussian_noise")) {
-    RCLCPP_DEBUG(impl_->ros_node_->get_logger(), "Missing <gassian_noise>, defaults to 0.0");
-    impl_->gaussian_noise_ = 0;
+  if(!sdf->HasElement("gaussian_noise_range")) {
+    RCLCPP_DEBUG(impl_->ros_node_->get_logger(), "Missing <gaussian_noise_range>, defaults to 0.0");
+    impl_->gaussian_noise_range_ = 0.0;
   } else {
-    impl_->gaussian_noise_ = sdf->GetElement("gaussian_noise")->Get<double>();
+    impl_->gaussian_noise_range_ = sdf->GetElement("gaussian_noise_range")->Get<double>();
+  }
+
+  if(!sdf->HasElement("gaussian_noise_bearing")) {
+    RCLCPP_DEBUG(impl_->ros_node_->get_logger(), "Missing <gaussian_noise_bearing>, defaults to 0.0");
+    impl_->gaussian_noise_bearing_ = 0.0;
+  } else {
+    impl_->gaussian_noise_bearing_ = sdf->GetElement("gaussian_noise_bearing")->Get<double>();
   }
 
   impl_->last_time_ = impl_->world_->SimTime();
@@ -270,11 +303,15 @@ void GazeboLandmarksPrivate::OnUpdate(const gazebo::common::UpdateInfo & info)
     // Get the landmark distance and bearing
     measure_msg.landmark_name = landmark_name;
     measure_msg.range = distance2D(landmark_pose_robot_frame.Pos(), ignition::math::Vector3d(0,0,0));
+    if(measure_msg.range < min_range_ || measure_msg.range > max_range_)
+    {
+      continue;
+    }
     measure_msg.bearing = atan2(landmark_pose_robot_frame.Pos().Y(), landmark_pose_robot_frame.Pos().X());
 
     // Add noise
-    measure_msg.range += ignition::math::Rand::DblNormal(0, gaussian_noise_);
-    measure_msg.bearing += ignition::math::Rand::DblNormal(0, gaussian_noise_);
+    measure_msg.range += ignition::math::Rand::DblNormal(0, gaussian_noise_range_);
+    measure_msg.bearing += ignition::math::Rand::DblNormal(0, gaussian_noise_bearing_);
     measure_msg.bearing = wrapAngle(measure_msg.bearing);
     // Add to the array
     measure_array_msg.landmarks.push_back(measure_msg);
