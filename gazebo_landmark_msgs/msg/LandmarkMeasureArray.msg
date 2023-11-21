@@ -1,0 +1,2 @@
+std_msgs/Header header
+gazebo_landmark_msgs/LandmarkMeasure[] landmarks

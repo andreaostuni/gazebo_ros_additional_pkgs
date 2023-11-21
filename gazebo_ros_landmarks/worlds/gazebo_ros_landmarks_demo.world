@@ -1,4 +1,4 @@
-<?xml version="1.0" ?>
+<?xml version="1.0"?>
 <!--
   Gazebo ROS bumper plugin demo
 
@@ -51,13 +51,6 @@
               <size>100 100</size>
             </plane>
           </geometry>
-          <material>
-            <script>
-              <uri>model://media/materials/scripts/</uri>
-              <uri>model://media/materials/textures/</uri>
-              <name>Gazebo/Grey</name>
-            </script>
-          </material>
         </visual>
       </link>
     </model>
@@ -105,20 +98,63 @@
             </sphere>
           </geometry>
         </visual>
-        <sensor type="contact" name="bumper">
-          <update_rate>10</update_rate>
-          <contact>
-            <collision>collision</collision>
-          </contact>
-          <plugin name="collision_sensor" filename="libgazebo_ros_collision.so">
-            <ros>
-              <namespace>demo</namespace>
-            </ros>
-            <frame_name>world</frame_name>
-            <terrain_name>ground_plane</terrain_name>
-          </plugin>
-        </sensor>
       </link>
     </model>
+
+
+    <model name="landmark0">
+      <pose>-1 0 1 0 0 0</pose>
+      <static>true</static>
+    </model>
+
+    <model name="landmark1">
+      <pose>-2 0 1 0 0 0</pose>
+      <static>true</static>
+    </model>
+
+    <model name="landmark2">
+      <pose>-3 0 1 0 0 0</pose>
+      <static>true</static>
+    </model>
+
+    <model name="landmark3">
+      <pose>-4 0 1 0 0 0</pose>
+      <static>true</static>
+    </model>
+
+    <model name="landmark4">
+      <pose>-1 2 1 0 0 0</pose>
+      <static>true</static>
+    </model>
+
+    <plugin name="landmark_demo" filename="libgazebo_ros_landmarks.so">
+      <ros>
+        <namespace>/demo</namespace>
+      </ros>
+
+      <landmark_names>
+        <landmark>landmark0</landmark>
+        <landmark>landmark1</landmark>
+        <landmark>landmark2</landmark>
+        <landmark>landmark3</landmark>
+        <landmark>landmark4</landmark>
+      </landmark_names>
+
+      <!-- Name of the robot model -->
+      <robot_name>ball</robot_name>
+      <!-- Name of the reference link -->
+      <robot_frame_name>link</robot_frame_name>
+
+      <!-- Update rate in Hz, defaults to 0.0, which means as fast as possible -->
+      <update_rate>10</update_rate>
+
+      <!-- Noise parameters -->
+      <!-- Standard deviation of the noise to be added to the landmark measurements. -->
+      <gaussian_noise>0.0</gaussian_noise>
+
+
+    </plugin>
+
+
   </world>
 </sdf>
