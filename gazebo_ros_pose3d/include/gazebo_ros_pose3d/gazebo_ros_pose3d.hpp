@@ -76,6 +76,9 @@ class GazeboPose3DPrivate;
       <!-- Publish the pose as a tf2 transform. -->
       <publish_tf>true</publish_tf>
 
+      <!-- Use the relative velocity of the body_name -->
+      <relative_velocity>true</relative_velocity>
+
       <!-- Update rate in Hz, defaults to 0.0, which means as fast as possible -->
       <update_rate>1</update_rate>
 

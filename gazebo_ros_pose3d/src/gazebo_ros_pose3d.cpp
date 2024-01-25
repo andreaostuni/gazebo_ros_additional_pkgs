@@ -90,6 +90,11 @@ public:
   bool publish_tf_{false};
 
   /**
+   * @brief Whether to publish the velocity as a relative velocity.
+   */
+  bool relative_velocity_{false};
+
+  /**
    * @brief Whether to publish a transform from map to world.
    */
   bool publish_map_to_world_{false};
@@ -218,6 +223,13 @@ void GazeboPose3D::Load(gazebo::physics::ModelPtr model, sdf::ElementPtr sdf)
     impl_->publish_tf_ = sdf->GetElement("publish_tf")->Get<bool>();
   }
 
+  if(!sdf->HasElement("relative_velocity")) {
+    RCLCPP_DEBUG(
+      impl_->ros_node_->get_logger(), "Missing <relative_velocity>, defaults to false");
+  } else {
+    impl_->relative_velocity_ = sdf->GetElement("relative_velocity")->Get<bool>();
+  }
+
   if(!sdf->HasElement("publish_map_to_world")) {
     RCLCPP_DEBUG(
       impl_->ros_node_->get_logger(), "Missing <publish_map_to_world>, defaults to false");
@@ -278,8 +290,14 @@ void GazeboPose3DPrivate::OnUpdate(const gazebo::common::UpdateInfo & info)
   pose_msg.child_frame_id = link_->GetName();
 
   // Get inertial rates
-  ignition::math::Vector3d vpos = link_->WorldLinearVel();
-  ignition::math::Vector3d veul = link_->WorldAngularVel();
+  ignition::math::Vector3d vpos, veul;
+  if (relative_velocity_) {
+    vpos = link_->RelativeLinearVel();
+    veul = link_->RelativeAngularVel();
+  } else {
+    vpos = link_->WorldLinearVel();
+    veul = link_->WorldAngularVel();
+  }
 
   // Get pose/orientation
   auto pose = link_->WorldPose();
@@ -295,8 +313,10 @@ void GazeboPose3DPrivate::OnUpdate(const gazebo::common::UpdateInfo & info)
     pose.Pos() = frame_pose.Rot().RotateVectorReverse(pose.Pos());
     pose.Rot() *= frame_pose.Rot().Inverse();
 
-    vpos = frame_pose.Rot().RotateVector(vpos - frame_vpos);
-    veul = frame_pose.Rot().RotateVector(veul - frame_veul);
+    if (!relative_velocity_){
+      vpos = frame_pose.Rot().RotateVector(vpos - frame_vpos);
+      veul = frame_pose.Rot().RotateVector(veul - frame_veul);
+    } 
   }
 
   // Apply constant offsets
