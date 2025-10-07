@@ -2,6 +2,7 @@
 #include <string>
 #include <set>
 #include <deque>
+#include <regex>
 
 #include <gazebo/physics/physics.hh>
 #include "gazebo/sensors/SensorFactory.hh"
@@ -227,6 +228,20 @@ void PeopleDetectorPrivate::OnUpdate()
     people_msgs::msg::Person person;
     // use the same name as in the parameter server
     person.name = getModelName(name);
+    // fill the tags (only id for now)
+
+    // people_msgs::msg::Person::tags is a string array. Store id as "id:<value>"
+    std::string id_value;
+    if (std::regex_match(name, std::regex(".*_(\\d+)$")))
+    {
+      id_value = name.substr(name.find_last_of('_') + 1);
+    }
+    else
+    {
+      id_value = std::to_string(i + 1);  // at least "1"
+    }
+    person.tags.clear();
+    person.tags.push_back(std::string("id:") + id_value);
 
     // Pose (relative to camera)
     auto& p = person.position;
