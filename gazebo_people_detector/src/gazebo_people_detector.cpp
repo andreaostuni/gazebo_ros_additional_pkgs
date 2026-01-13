@@ -220,28 +220,41 @@ void PeopleDetectorPrivate::OnUpdate()
       RCLCPP_DEBUG(ros_node_->get_logger(), "Ray from camera to %s hit %s instead", name.c_str(), entity_name.c_str());
       continue;
     }
-    RCLCPP_DEBUG(ros_node_->get_logger(), "Detected person: %s", name.c_str());
-
-    // Add to detected models set
-    detected_models.insert(name);
-
+    RCLCPP_DEBUG(ros_node_->get_logger(), "Processing model name: %s", name.c_str());
+    
     people_msgs::msg::Person person;
     // use the same name as in the parameter server
     person.name = getModelName(name);
-    // fill the tags (only id for now)
+    
+    // check for duplicates
+    if (detected_models.find(person.name) != detected_models.end())
+    {
+      RCLCPP_DEBUG(ros_node_->get_logger(), "Duplicate detection of model name %s, skipping", person.name.c_str());
+      continue;
+    }
+    // Add to detected models set
+    detected_models.insert(person.name);
+    
 
-    // people_msgs::msg::Person::tags is a string array. Store id as "id:<value>"
     std::string id_value;
+    // fill the tags (only id for now)
+    RCLCPP_DEBUG(ros_node_->get_logger(), "Detected person: %s", person.name.c_str());
     if (std::regex_match(name, std::regex(".*_(\\d+)$")))
     {
-      id_value = name.substr(name.find_last_of('_') + 1);
+      // extract the trailing number as ID
+      std::smatch match;
+      std::regex_search(name, match, std::regex(".*_(\\d+)$"));
+      id_value = match[1];
     }
     else
     {
-      id_value = std::to_string(i + 1);  // at least "1"
+      id_value = std::to_string(i);  // at least "1"
     }
     person.tags.clear();
-    person.tags.push_back(std::string("id:") + id_value);
+    person.tagnames.clear();
+    person.tagnames.push_back("id");    person.tags.push_back(id_value);
+
+    person.reliability = 1.0;  // detected by sensor, so high confidence
 
     // Pose (relative to camera)
     auto& p = person.position;
