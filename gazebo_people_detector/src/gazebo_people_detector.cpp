@@ -3,6 +3,7 @@
 #include <set>
 #include <deque>
 #include <regex>
+#include <algorithm>
 
 #include <gazebo/physics/physics.hh>
 #include "gazebo/sensors/SensorFactory.hh"
@@ -17,7 +18,7 @@ using namespace std::chrono_literals;
 // Structure to hold position and timestamp data
 struct PositionHistory
 {
-  ignition::math::Vector3d position;
+  ignition::math::Pose3d pose;
   gazebo::common::Time timestamp;
 };
 
@@ -34,8 +35,12 @@ public:
   // Get the model name without suffix
   std::string getModelName(const std::string& name) const;
   // Compute the velocity of a model based on position differences over time
-  geometry_msgs::msg::Point ComputeVelocity(const std::string& name, const ignition::math::Vector3d& current_position,
-                                            gazebo::common::Time current_time);
+  geometry_msgs::msg::Point ComputeVelocity(const std::string& name);
+  // Store pose samples for later velocity computation
+  void RecordPoseSample(const std::string& name, const ignition::math::Pose3d& pose,
+                        gazebo::common::Time timestamp);
+  // Ensure every allowed agent gets its pose recorded even if not detected
+  void UpdateAllowedAgentsPoseHistory(gazebo::common::Time current_time);
 
   /// \brief ros node required to call the service
   gazebo_ros::Node::SharedPtr ros_node_;
@@ -76,10 +81,10 @@ public:
   static const size_t VELOCITY_STEP_SIZE = 3;
   // Exponential moving average smoothing factor (0 < alpha <= 1)
   // Higher values respond faster to changes, lower values provide more smoothing
-  static constexpr double EMA_ALPHA = 0.5;
+  static constexpr double EMA_ALPHA = 0.7;
   // Minimum time interval between position updates (in seconds)
   // This prevents storing redundant data when sensor updates very frequently
-  static constexpr double MIN_UPDATE_INTERVAL = 0.1;
+  static constexpr double MIN_UPDATE_INTERVAL = 0.01;
 
   // map of model names to their last position update time
   std::map<std::string, gazebo::common::Time> last_position_update_time_;
@@ -163,6 +168,7 @@ void PeopleDetectorPrivate::OnUpdate()
 {
   // Read latest logical camera image (poses of models relative to camera frame)
   const gazebo::msgs::LogicalCameraImage& img = parent_sensor_->Image();
+  const gazebo::common::Time sensor_time = parent_sensor_->LastUpdateTime();
 
   people_msgs::msg::People output_msg;
   output_msg.header.stamp = ros_node_->now();
@@ -203,6 +209,7 @@ void PeopleDetectorPrivate::OnUpdate()
       RCLCPP_WARN(ros_node_->get_logger(), "Model %s not found in world", name.c_str());
       continue;
     }
+    RecordPoseSample(name, model->WorldPose(), sensor_time);
 
     // Use ray to check if there is line of sight between camera and model
     // Ray goes from camera to model
@@ -239,15 +246,18 @@ void PeopleDetectorPrivate::OnUpdate()
     std::string id_value;
     // fill the tags (only id for now)
     RCLCPP_DEBUG(ros_node_->get_logger(), "Detected person: %s", person.name.c_str());
-    if (std::regex_match(name, std::regex(".*_(\\d+)$")))
+    // regex in search of trailing number in the name
+    // .*(\\d+)$ matches any string ending with digits
+    static const std::regex kIdSuffix(R"((\d+)$)");
+    std::smatch match;
+    if (std::regex_search(person.name, match, kIdSuffix))
     {
       // extract the trailing number as ID
-      std::smatch match;
-      std::regex_search(name, match, std::regex(".*_(\\d+)$"));
       id_value = match[1];
     }
     else
     {
+      RCLCPP_WARN(ros_node_->get_logger(), "No ID found in model name %s, using index as ID", person.name.c_str());
       id_value = std::to_string(i);  // at least "1"
     }
     person.tags.clear();
@@ -272,79 +282,30 @@ void PeopleDetectorPrivate::OnUpdate()
     if (lastUpdate != gazebo::common::Time(0))
     {
       RCLCPP_DEBUG(ros_node_->get_logger(), "lastUpdate: %.3f, current: %.3f", lastUpdate.Double(),
-                   parent_sensor_->LastUpdateTime().Double());
-      v = ComputeVelocity(name, model->WorldPose().Pos(), parent_sensor_->LastUpdateTime());
+                   sensor_time.Double());
+      v = ComputeVelocity(name);
     }
     output_msg.people.emplace_back(std::move(person));
-
-    // update position history only if enough time has passed
-    gazebo::common::Time current_time = parent_sensor_->LastUpdateTime();
-    auto last_update_it = last_position_update_time_.find(name);
-    bool should_update = false;
-
-    if (last_update_it == last_position_update_time_.end())
-    {
-      // First time seeing this model
-      should_update = true;
-    }
-    else
-    {
-      // Check if enough time has passed since last update
-      double time_diff = (current_time - last_update_it->second).Double();
-      should_update = (time_diff >= MIN_UPDATE_INTERVAL);
-    }
-
-    if (should_update)
-    {
-      auto& history = position_history_[name];
-      history.push_back({ model->WorldPose().Pos(), current_time });
-
-      // Keep only the last MAX_HISTORY_SIZE positions
-      if (history.size() > MAX_HISTORY_SIZE)
-      {
-        history.pop_front();
-      }
-
-      // Update the last position update time
-      last_position_update_time_[name] = current_time;
-
-      RCLCPP_DEBUG(ros_node_->get_logger(), "Updated position history for %s (history size: %zu)", name.c_str(),
-                   history.size());
-    }
-    else
-    {
-      RCLCPP_DEBUG(ros_node_->get_logger(), "Skipping position update for %s (insufficient time delta)", name.c_str());
-    }
   }
 
-  // Clear position history and velocity estimates of models that were not detected this time
-  for (auto it = position_history_.begin(); it != position_history_.end();)
-  {
-    if (detected_models.find(it->first) == detected_models.end())
-    {
-      RCLCPP_DEBUG(ros_node_->get_logger(), "Clearing position history of not detected model %s", it->first.c_str());
-      velocity_estimates_.erase(it->first);         // Also clear velocity estimate
-      last_position_update_time_.erase(it->first);  // Also clear last update time
-      it = position_history_.erase(it);
-    }
-    else
-    {
-      ++it;
-    }
-  }
+  UpdateAllowedAgentsPoseHistory(sensor_time);
 
   if (!output_msg.people.empty())
+  {
+    std::sort(output_msg.people.begin(), output_msg.people.end(),
+              [](const people_msgs::msg::Person& lhs, const people_msgs::msg::Person& rhs) {
+                return lhs.name < rhs.name;
+              });
     pub_people_->publish(output_msg);
-  lastUpdate = parent_sensor_->LastUpdateTime();
+  }
+  lastUpdate = sensor_time;
 }
 
 // Velocity estimation using exponential moving average of velocities computed
 // from positions that are n steps apart. This provides stable velocity estimates
 // while being computationally efficient.
 
-geometry_msgs::msg::Point PeopleDetectorPrivate::ComputeVelocity(const std::string& name,
-                                                                 const ignition::math::Vector3d& current_position,
-                                                                 gazebo::common::Time current_time)
+geometry_msgs::msg::Point PeopleDetectorPrivate::ComputeVelocity(const std::string& name)
 {
   geometry_msgs::msg::Point velocity;
 
@@ -380,12 +341,12 @@ geometry_msgs::msg::Point PeopleDetectorPrivate::ComputeVelocity(const std::stri
 
   // Compute instantaneous velocity using positions n steps apart
   geometry_msgs::msg::Point current_velocity;
-  current_velocity.x = (current_point.position.X() - reference_point.position.X()) / dt;
-  current_velocity.y = (current_point.position.Y() - reference_point.position.Y()) / dt;
+  current_velocity.x = (current_point.pose.Pos().X() - reference_point.pose.Pos().X()) / dt;
+  current_velocity.y = (current_point.pose.Pos().Y() - reference_point.pose.Pos().Y()) / dt;
 
   // For angular velocity, handle angle wrapping
-  double current_yaw = std::atan2(std::sin(current_point.position.Z()), std::cos(current_point.position.Z()));
-  double reference_yaw = std::atan2(std::sin(reference_point.position.Z()), std::cos(reference_point.position.Z()));
+  double current_yaw = current_point.pose.Rot().Yaw();
+  double reference_yaw = reference_point.pose.Rot().Yaw();
   double dyaw = current_yaw - reference_yaw;
   // normalize to [-pi, pi]
   dyaw = std::atan2(std::sin(dyaw), std::cos(dyaw));
@@ -418,6 +379,61 @@ geometry_msgs::msg::Point PeopleDetectorPrivate::ComputeVelocity(const std::stri
   }
 
   return velocity;
+}
+
+void PeopleDetectorPrivate::RecordPoseSample(const std::string& name, const ignition::math::Pose3d& pose,
+                                             gazebo::common::Time timestamp)
+{
+  auto last_it = last_position_update_time_.find(name);
+  if (last_it != last_position_update_time_.end())
+  {
+    double time_diff = (timestamp - last_it->second).Double();
+    if (time_diff < MIN_UPDATE_INTERVAL)
+    {
+      RCLCPP_DEBUG(ros_node_->get_logger(), "Skipping pose update for %s (dt=%.3f < %.3f)", name.c_str(), time_diff,
+                   MIN_UPDATE_INTERVAL);
+      return;
+    }
+  }
+
+  auto& history = position_history_[name];
+  history.push_back({ pose, timestamp });
+  if (history.size() > MAX_HISTORY_SIZE)
+  {
+    history.pop_front();
+  }
+
+  last_position_update_time_[name] = timestamp;
+
+  RCLCPP_DEBUG(ros_node_->get_logger(), "Recorded pose sample for %s (history size: %zu)", name.c_str(),
+               history.size());
+}
+
+void PeopleDetectorPrivate::UpdateAllowedAgentsPoseHistory(gazebo::common::Time current_time)
+{
+  if (!world_)
+  {
+    return;
+  }
+
+  if (agents_names_.empty())
+  {
+    // Without an explicit allowlist we already recorded all visible models during this update.
+    return;
+  }
+
+  for (const auto& agent_name : agents_names_)
+  {
+    auto model = world_->ModelByName(agent_name);
+    if (!model)
+    {
+      RCLCPP_DEBUG(ros_node_->get_logger(), "Allowed agent %s not found in world, skipping pose buffer update",
+                   agent_name.c_str());
+      continue;
+    }
+
+    RecordPoseSample(model->GetName(), model->WorldPose(), current_time);
+  }
 }
 
 void PeopleDetectorPrivate::GetAgentsList()
@@ -459,7 +475,9 @@ bool PeopleDetectorPrivate::allowed(const std::string& name) const
   if (agents_names_.empty())
     return true;
   return std::any_of(agents_names_.begin(), agents_names_.end(),
-                     [&name](const std::string& agent_name) { return name.find(agent_name) != std::string::npos; });
+                     [&name](const std::string& agent_name) { return name == agent_name; });
+                    //  [&name](const std::string& agent_name) { return name.find(agent_name) != std::string::npos; });
+
 }
 
 std::string PeopleDetectorPrivate::getModelName(const std::string& name) const
