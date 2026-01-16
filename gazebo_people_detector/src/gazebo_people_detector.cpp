@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <string>
 #include <set>
+#include <map>
 #include <deque>
 #include <regex>
+#include <mutex>
 #include <algorithm>
 
 #include <gazebo/physics/physics.hh>
@@ -41,6 +43,8 @@ public:
                         gazebo::common::Time timestamp);
   // Ensure every allowed agent gets its pose recorded even if not detected
   void UpdateAllowedAgentsPoseHistory(gazebo::common::Time current_time);
+  // Timer callback to publish the latest computed people message
+  void PublishLatestPeople();
 
   /// \brief ros node required to call the service
   gazebo_ros::Node::SharedPtr ros_node_;
@@ -69,7 +73,13 @@ public:
   std::vector<std::string> agents_names_;
   // Time of the last update.
   gazebo::common::Time lastUpdate;
-
+  // Requested publish rate (Hz). 0 disables throttling.
+  double publish_rate_hz_{ 0.0 };
+  double publish_period_{ 0.0 };
+  rclcpp::TimerBase::SharedPtr publish_timer_;
+  std::mutex latest_people_mutex_;
+  people_msgs::msg::People latest_people_msg_;
+  bool has_latest_people_msg_{ false };
   // map of model names to their position history (last n positions)
   std::map<std::string, std::deque<PositionHistory>> position_history_;
   // map of model names to their current velocity estimate (EMA)
@@ -127,6 +137,29 @@ void PeopleDetector::Load(gazebo::sensors::SensorPtr _sensor, sdf::ElementPtr _s
 
   // Get the tf frame for output
   impl_->frame_name_ = _sdf->Get<std::string>("frame_name", "world").first;
+  impl_->publish_rate_hz_ = _sdf->Get<double>("update_rate", 0.0).first;
+  if (impl_->publish_rate_hz_ <= 0.0)
+  {
+    const double sensor_rate = impl_->parent_sensor_->UpdateRate();
+    if (sensor_rate > 0.0)
+    {
+      impl_->publish_rate_hz_ = sensor_rate;
+      RCLCPP_INFO(impl_->ros_node_->get_logger(),
+                  "Publish rate not specified, using sensor update rate %.2f Hz", sensor_rate);
+    }
+    else
+    {
+      impl_->publish_rate_hz_ = 30.0;
+      RCLCPP_WARN(impl_->ros_node_->get_logger(),
+                  "Publish rate not specified and sensor update rate unavailable, defaulting to %.2f Hz",
+                  impl_->publish_rate_hz_);
+    }
+  }
+  else
+  {
+    RCLCPP_INFO(impl_->ros_node_->get_logger(), "Publishing detected people at %.2f Hz", impl_->publish_rate_hz_);
+  }
+  impl_->publish_period_ = 1.0 / impl_->publish_rate_hz_;
 
   // Get a pointer to the world.
   impl_->world_ = gazebo::physics::get_world(impl_->parent_sensor_->WorldName());
@@ -159,6 +192,9 @@ void PeopleDetector::Load(gazebo::sensors::SensorPtr _sensor, sdf::ElementPtr _s
 
   impl_->update_connection_ =
       gazebo::event::Events::ConnectWorldUpdateBegin(std::bind(&PeopleDetectorPrivate::OnUpdate, impl_.get()));
+  impl_->publish_timer_ = impl_->ros_node_->create_wall_timer(
+      std::chrono::duration<double>(impl_->publish_period_),
+      std::bind(&PeopleDetectorPrivate::PublishLatestPeople, impl_.get()));
 
   // Get the agents list from the parameter server
   impl_->GetAgentsList();
@@ -222,10 +258,17 @@ void PeopleDetectorPrivate::OnUpdate()
     ray_->GetIntersection(dist_hit, entity_name);
 
     // If the ray hits something before the model, then there is no line of sight
+    // unless what it hit is another allowed agent (so we still consider it detectable)
     if (!entity_name.empty() && entity_name.find(name) == std::string::npos)
     {
-      RCLCPP_DEBUG(ros_node_->get_logger(), "Ray from camera to %s hit %s instead", name.c_str(), entity_name.c_str());
-      continue;
+      const bool hit_allowed_agent =
+          std::any_of(agents_names_.begin(), agents_names_.end(),
+                      [&entity_name](const std::string& agent_name) { return entity_name.find(agent_name) != std::string::npos; });
+      if (!hit_allowed_agent)
+      {
+        RCLCPP_DEBUG(ros_node_->get_logger(), "Ray from camera to %s hit %s instead", name.c_str(), entity_name.c_str());
+        continue;
+      }
     }
     RCLCPP_DEBUG(ros_node_->get_logger(), "Processing model name: %s", name.c_str());
     
@@ -290,15 +333,55 @@ void PeopleDetectorPrivate::OnUpdate()
 
   UpdateAllowedAgentsPoseHistory(sensor_time);
 
-  if (!output_msg.people.empty())
   {
-    std::sort(output_msg.people.begin(), output_msg.people.end(),
-              [](const people_msgs::msg::Person& lhs, const people_msgs::msg::Person& rhs) {
-                return lhs.name < rhs.name;
-              });
-    pub_people_->publish(output_msg);
+    std::lock_guard<std::mutex> lock(latest_people_mutex_);
+    // the latest people message for publishing
+    // update and replace the people detected
+    latest_people_msg_.header.stamp = output_msg.header.stamp;
+    latest_people_msg_.header.frame_id = output_msg.header.frame_id;
+    for (auto& person : output_msg.people)
+    {
+      // remove previous entries for same person
+      latest_people_msg_.people.erase(
+          std::remove_if(latest_people_msg_.people.begin(), latest_people_msg_.people.end(),
+                         [&person](const people_msgs::msg::Person& p) { return p.name == person.name; }),
+          latest_people_msg_.people.end());
+      // add the new detection
+      latest_people_msg_.people.push_back(std::move(person));
+    }
+    if (latest_people_msg_.people.size() > 1)
+    {
+      std::sort(latest_people_msg_.people.begin(), latest_people_msg_.people.end(),
+                [](const people_msgs::msg::Person& lhs, const people_msgs::msg::Person& rhs) {
+                  return lhs.name < rhs.name;
+                });
+    }
+    has_latest_people_msg_ = true;
   }
   lastUpdate = sensor_time;
+}
+
+void PeopleDetectorPrivate::PublishLatestPeople()
+{
+  if (!pub_people_)
+  {
+    return;
+  }
+
+  people_msgs::msg::People msg;
+  {
+    std::lock_guard<std::mutex> lock(latest_people_mutex_);
+    if (!has_latest_people_msg_)
+    {
+      return;
+    }
+    msg = latest_people_msg_;
+    // clear the latest_people_msg_ to avoid republishing same data
+    has_latest_people_msg_ = false;
+    latest_people_msg_.people.clear();
+  }
+
+  pub_people_->publish(msg);
 }
 
 // Velocity estimation using exponential moving average of velocities computed
