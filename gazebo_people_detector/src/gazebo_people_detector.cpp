@@ -1,10 +1,10 @@
 #include <stdio.h>
+#include <cmath>
 #include <string>
 #include <set>
 #include <map>
 #include <deque>
 #include <regex>
-#include <mutex>
 #include <algorithm>
 
 #include <gazebo/physics/physics.hh>
@@ -34,6 +34,9 @@ public:
 
   // Helpers
   bool allowed(const std::string& name) const;
+  // Check if a world-space position is inside the sensor frustum
+  bool isInsideFrustum(const ignition::math::Pose3d& cameraPose,
+                       const ignition::math::Vector3d& worldPos) const;
   // Get the model name without suffix
   std::string getModelName(const std::string& name) const;
   // Compute the velocity of a model based on position differences over time
@@ -43,8 +46,6 @@ public:
                         gazebo::common::Time timestamp);
   // Ensure every allowed agent gets its pose recorded even if not detected
   void UpdateAllowedAgentsPoseHistory(gazebo::common::Time current_time);
-  // Timer callback to publish the latest computed people message
-  void PublishLatestPeople();
 
   /// \brief ros node required to call the service
   gazebo_ros::Node::SharedPtr ros_node_;
@@ -73,13 +74,6 @@ public:
   std::vector<std::string> agents_names_;
   // Time of the last update.
   gazebo::common::Time lastUpdate;
-  // Requested publish rate (Hz). 0 disables throttling.
-  double publish_rate_hz_{ 0.0 };
-  double publish_period_{ 0.0 };
-  rclcpp::TimerBase::SharedPtr publish_timer_;
-  std::mutex latest_people_mutex_;
-  people_msgs::msg::People latest_people_msg_;
-  bool has_latest_people_msg_{ false };
   // map of model names to their position history (last n positions)
   std::map<std::string, std::deque<PositionHistory>> position_history_;
   // map of model names to their current velocity estimate (EMA)
@@ -98,6 +92,12 @@ public:
 
   // map of model names to their last position update time
   std::map<std::string, gazebo::common::Time> last_position_update_time_;
+
+  // Frustum parameters (read from sensor SDF)
+  double frustum_near_{ 0.25 };
+  double frustum_far_{ 4.0 };
+  double frustum_half_hfov_{ 0.7 };   // half of horizontal FOV in radians
+  double frustum_half_vfov_{ 0.4 };   // half of vertical FOV in radians
 
   // Detected people
   people_msgs::msg::People people;
@@ -137,29 +137,6 @@ void PeopleDetector::Load(gazebo::sensors::SensorPtr _sensor, sdf::ElementPtr _s
 
   // Get the tf frame for output
   impl_->frame_name_ = _sdf->Get<std::string>("frame_name", "world").first;
-  impl_->publish_rate_hz_ = _sdf->Get<double>("update_rate", 0.0).first;
-  if (impl_->publish_rate_hz_ <= 0.0)
-  {
-    const double sensor_rate = impl_->parent_sensor_->UpdateRate();
-    if (sensor_rate > 0.0)
-    {
-      impl_->publish_rate_hz_ = sensor_rate;
-      RCLCPP_INFO(impl_->ros_node_->get_logger(),
-                  "Publish rate not specified, using sensor update rate %.2f Hz", sensor_rate);
-    }
-    else
-    {
-      impl_->publish_rate_hz_ = 30.0;
-      RCLCPP_WARN(impl_->ros_node_->get_logger(),
-                  "Publish rate not specified and sensor update rate unavailable, defaulting to %.2f Hz",
-                  impl_->publish_rate_hz_);
-    }
-  }
-  else
-  {
-    RCLCPP_INFO(impl_->ros_node_->get_logger(), "Publishing detected people at %.2f Hz", impl_->publish_rate_hz_);
-  }
-  impl_->publish_period_ = 1.0 / impl_->publish_rate_hz_;
 
   // Get a pointer to the world.
   impl_->world_ = gazebo::physics::get_world(impl_->parent_sensor_->WorldName());
@@ -190,11 +167,23 @@ void PeopleDetector::Load(gazebo::sensors::SensorPtr _sensor, sdf::ElementPtr _s
   }
   RCLCPP_INFO(impl_->ros_node_->get_logger(), "PeopleDetector: Created ray shape.");
 
+  // Connect to the sensor's own update event so OnUpdate fires at the sensor rate.
   impl_->update_connection_ =
-      gazebo::event::Events::ConnectWorldUpdateBegin(std::bind(&PeopleDetectorPrivate::OnUpdate, impl_.get()));
-  impl_->publish_timer_ = impl_->ros_node_->create_wall_timer(
-      std::chrono::duration<double>(impl_->publish_period_),
-      std::bind(&PeopleDetectorPrivate::PublishLatestPeople, impl_.get()));
+      impl_->parent_sensor_->ConnectUpdated(std::bind(&PeopleDetectorPrivate::OnUpdate, impl_.get()));
+  impl_->parent_sensor_->SetActive(true);
+
+  // Read frustum parameters from the sensor
+  impl_->frustum_near_ = impl_->parent_sensor_->Near();
+  impl_->frustum_far_ = impl_->parent_sensor_->Far();
+  const double hfov = impl_->parent_sensor_->HorizontalFOV().Radian();
+  const double aspect = impl_->parent_sensor_->AspectRatio();
+  impl_->frustum_half_hfov_ = hfov / 2.0;
+  impl_->frustum_half_vfov_ = std::atan(std::tan(hfov / 2.0) / aspect);
+  RCLCPP_INFO(impl_->ros_node_->get_logger(),
+              "Frustum params: near=%.2f far=%.2f hfov=%.1f° vfov=%.1f°",
+              impl_->frustum_near_, impl_->frustum_far_,
+              hfov * 180.0 / M_PI,
+              2.0 * impl_->frustum_half_vfov_ * 180.0 / M_PI);
 
   // Get the agents list from the parameter server
   impl_->GetAgentsList();
@@ -202,7 +191,8 @@ void PeopleDetector::Load(gazebo::sensors::SensorPtr _sensor, sdf::ElementPtr _s
 
 void PeopleDetectorPrivate::OnUpdate()
 {
-  // Read latest logical camera image (poses of models relative to camera frame)
+  // We still read the logical camera image for the camera's world pose,
+  // but we do NOT use its model list (which is unreliable for actors).
   const gazebo::msgs::LogicalCameraImage& img = parent_sensor_->Image();
   const gazebo::common::Time sensor_time = parent_sensor_->LastUpdateTime();
 
@@ -222,96 +212,53 @@ void PeopleDetectorPrivate::OnUpdate()
     last_position_update_time_.clear();
   }
 
-  // Collect currently detected models to clean up last_positions_ later
-  std::set<std::string> detected_models;
-
-  for (int i = 0; i < img.model_size(); ++i)
+  // Iterate over all known agents (not just what the logical camera reports)
+  // and check each one against our own frustum validation.
+  for (const auto& agent_name : agents_names_)
   {
-    const std::string name = img.model(i).name();
-    // we need to filter the models, as the logical camera
-    // may detect other models in the scene
-    // also skip duplicates (keep first detected one)
-    if (!allowed(name))
-    {
-      RCLCPP_DEBUG(ros_node_->get_logger(), "Ignoring model: %s", name.c_str());
-      continue;
-    }
-
-    // retrieve the model from the world
-    // (to get access to other properties if needed)
-    auto model = world_->ModelByName(name);
+    auto model = world_->ModelByName(agent_name);
     if (!model)
     {
-      RCLCPP_WARN(ros_node_->get_logger(), "Model %s not found in world", name.c_str());
+      RCLCPP_DEBUG(ros_node_->get_logger(), "Agent %s not found in world", agent_name.c_str());
       continue;
     }
-    RecordPoseSample(name, model->WorldPose(), sensor_time);
 
-    // Use ray to check if there is line of sight between camera and model
-    // Ray goes from camera to model
-    const ignition::math::Vector3d& start = cameraPose.Pos();
-    const ignition::math::Vector3d& end = model->WorldPose().Pos();
-    ray_->SetPoints(start, end);
+    RecordPoseSample(agent_name, model->WorldPose(), sensor_time);
 
-    double dist_hit;
-    std::string entity_name;
-    ray_->GetIntersection(dist_hit, entity_name);
-
-    // If the ray hits something before the model, then there is no line of sight
-    // unless what it hit is another allowed agent (so we still consider it detectable)
-    if (!entity_name.empty() && entity_name.find(name) == std::string::npos)
+    // Check if the agent is inside the sensor frustum
+    if (!isInsideFrustum(cameraPose, model->WorldPose().Pos()))
     {
-      const bool hit_allowed_agent =
-          std::any_of(agents_names_.begin(), agents_names_.end(),
-                      [&entity_name](const std::string& agent_name) { return entity_name.find(agent_name) != std::string::npos; });
-      if (!hit_allowed_agent)
-      {
-        RCLCPP_DEBUG(ros_node_->get_logger(), "Ray from camera to %s hit %s instead", name.c_str(), entity_name.c_str());
-        continue;
-      }
+      RCLCPP_DEBUG(ros_node_->get_logger(), "Agent %s outside frustum, skipping", agent_name.c_str());
+      continue;
     }
-    RCLCPP_DEBUG(ros_node_->get_logger(), "Processing model name: %s", name.c_str());
+
+    RCLCPP_DEBUG(ros_node_->get_logger(), "Processing agent: %s", agent_name.c_str());
     
     people_msgs::msg::Person person;
-    // use the same name as in the parameter server
-    person.name = getModelName(name);
-    
-    // check for duplicates
-    if (detected_models.find(person.name) != detected_models.end())
-    {
-      RCLCPP_DEBUG(ros_node_->get_logger(), "Duplicate detection of model name %s, skipping", person.name.c_str());
-      continue;
-    }
-    // Add to detected models set
-    detected_models.insert(person.name);
-    
+    person.name = agent_name;
 
     std::string id_value;
     // fill the tags (only id for now)
-    RCLCPP_DEBUG(ros_node_->get_logger(), "Detected person: %s", person.name.c_str());
     // regex in search of trailing number in the name
-    // .*(\\d+)$ matches any string ending with digits
     static const std::regex kIdSuffix(R"((\d+)$)");
     std::smatch match;
     if (std::regex_search(person.name, match, kIdSuffix))
     {
-      // extract the trailing number as ID
       id_value = match[1];
     }
     else
     {
-      RCLCPP_WARN(ros_node_->get_logger(), "No ID found in model name %s, using index as ID", person.name.c_str());
-      id_value = std::to_string(i);  // at least "1"
+      RCLCPP_WARN(ros_node_->get_logger(), "No ID found in agent name %s", agent_name.c_str());
+      id_value = "0";
     }
     person.tags.clear();
     person.tagnames.clear();
     person.tagnames.push_back("id");    person.tags.push_back(id_value);
 
-    person.reliability = 1.0;  // detected by sensor, so high confidence
+    person.reliability = 1.0;
 
-    // Pose (relative to camera)
+    // Position (world frame)
     auto& p = person.position;
-    // retrieve X,Y from model world pose
     p.x = model->WorldPose().Pos().X();
     p.y = model->WorldPose().Pos().Y();
 
@@ -326,62 +273,24 @@ void PeopleDetectorPrivate::OnUpdate()
     {
       RCLCPP_DEBUG(ros_node_->get_logger(), "lastUpdate: %.3f, current: %.3f", lastUpdate.Double(),
                    sensor_time.Double());
-      v = ComputeVelocity(name);
+      v = ComputeVelocity(agent_name);
     }
     output_msg.people.emplace_back(std::move(person));
   }
 
-  UpdateAllowedAgentsPoseHistory(sensor_time);
+  // UpdateAllowedAgentsPoseHistory is no longer needed since we already
+  // recorded all agent poses above.
 
+  // Sort and publish directly — only agents currently in the sensor frustum
+  if (output_msg.people.size() > 1)
   {
-    std::lock_guard<std::mutex> lock(latest_people_mutex_);
-    // the latest people message for publishing
-    // update and replace the people detected
-    latest_people_msg_.header.stamp = output_msg.header.stamp;
-    latest_people_msg_.header.frame_id = output_msg.header.frame_id;
-    for (auto& person : output_msg.people)
-    {
-      // remove previous entries for same person
-      latest_people_msg_.people.erase(
-          std::remove_if(latest_people_msg_.people.begin(), latest_people_msg_.people.end(),
-                         [&person](const people_msgs::msg::Person& p) { return p.name == person.name; }),
-          latest_people_msg_.people.end());
-      // add the new detection
-      latest_people_msg_.people.push_back(std::move(person));
-    }
-    if (latest_people_msg_.people.size() > 1)
-    {
-      std::sort(latest_people_msg_.people.begin(), latest_people_msg_.people.end(),
-                [](const people_msgs::msg::Person& lhs, const people_msgs::msg::Person& rhs) {
-                  return lhs.name < rhs.name;
-                });
-    }
-    has_latest_people_msg_ = true;
+    std::sort(output_msg.people.begin(), output_msg.people.end(),
+              [](const people_msgs::msg::Person& lhs, const people_msgs::msg::Person& rhs) {
+                return lhs.name < rhs.name;
+              });
   }
+  pub_people_->publish(output_msg);
   lastUpdate = sensor_time;
-}
-
-void PeopleDetectorPrivate::PublishLatestPeople()
-{
-  if (!pub_people_)
-  {
-    return;
-  }
-
-  people_msgs::msg::People msg;
-  {
-    std::lock_guard<std::mutex> lock(latest_people_mutex_);
-    if (!has_latest_people_msg_)
-    {
-      return;
-    }
-    msg = latest_people_msg_;
-    // clear the latest_people_msg_ to avoid republishing same data
-    has_latest_people_msg_ = false;
-    latest_people_msg_.people.clear();
-  }
-
-  pub_people_->publish(msg);
 }
 
 // Velocity estimation using exponential moving average of velocities computed
@@ -574,6 +483,31 @@ std::string PeopleDetectorPrivate::getModelName(const std::string& name) const
       return agent_name;
   }
   return name;
+}
+
+bool PeopleDetectorPrivate::isInsideFrustum(
+    const ignition::math::Pose3d& cameraPose,
+    const ignition::math::Vector3d& worldPos) const
+{
+  // Transform the world position into the camera's local frame.
+  // In the camera frame, X is forward, Y is left, Z is up.
+  const ignition::math::Vector3d local = cameraPose.Rot().RotateVectorReverse(worldPos - cameraPose.Pos());
+
+  // Check forward distance (along camera X axis)
+  if (local.X() < frustum_near_ || local.X() > frustum_far_)
+    return false;
+
+  // Check horizontal angle (Y/X must be within ±half_hfov)
+  const double h_angle = std::abs(std::atan2(local.Y(), local.X()));
+  if (h_angle > frustum_half_hfov_)
+    return false;
+
+  // Check vertical angle (Z/X must be within ±half_vfov)
+  const double v_angle = std::abs(std::atan2(local.Z(), local.X()));
+  if (v_angle > frustum_half_vfov_)
+    return false;
+
+  return true;
 }
 
 // Register this plugin with the simulator
