@@ -1,0 +1,174 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="corridor_two_rooms_door_world">
+    <plugin name='gazebo_ros_state' filename='libgazebo_ros_state.so'>
+      <ros>
+        <namespace>/test</namespace>
+        <argument>model_states:=model_states_demo</argument>
+      </ros>
+      <update_rate>1.0</update_rate>
+    </plugin>
+    <include>
+      <uri>model://sun</uri>
+    </include>
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+    <gui fullscreen='0'>
+      <camera name='user_camera'>
+        <pose>1.99537 -0.708776 24.473 0 1.4778 0.014675</pose>
+        <view_controller>orbit</view_controller>
+        <projection_type>perspective</projection_type>
+      </camera>
+    </gui>
+
+
+    <physics type='ode'>
+      <real_time_update_rate>1000</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <ode>
+        <solver>
+          <type>quick</type>
+          <iters>150</iters>
+          <precon_iters>0</precon_iters>
+          <sor>1.4</sor>
+          <use_dynamic_moi_rescaling>1</use_dynamic_moi_rescaling>
+        </solver>
+        <constraints>
+          <cfm>1e-05</cfm>
+          <erp>0.2</erp>
+          <contact_max_correcting_vel>2000</contact_max_correcting_vel>
+          <contact_surface_layer>0.01</contact_surface_layer>
+        </constraints>
+      </ode>
+    </physics>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.8 0.8 0.8 1</background>
+    </scene>
+
+    <!--
+      Layout (top view, meters)
+
+      y ^
+        |
+        |   left room             corridor               right room
+        |  x:[-4,0]              x:[0,8]                 x:[8,12]
+        |
+        |  Door between corridor and right room is centered at x=8, y=0.
+        +-> x
+    -->
+
+    <!-- Left room outer shell -->
+    <model name="left_room_walls">
+      <static>true</static>
+      <link name="link">
+        <!-- north -->
+        <collision name="north_collision"><pose>-2  2.05 1 0 0 0</pose><geometry><box><size>4.2 0.1 2</size></box></geometry></collision>
+        <visual    name="north_visual"><pose>-2  2.05 1 0 0 0</pose><geometry><box><size>4.2 0.1 2</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+        <!-- south -->
+        <collision name="south_collision"><pose>-2 -2.05 1 0 0 0</pose><geometry><box><size>4.2 0.1 2</size></box></geometry></collision>
+        <visual    name="south_visual"><pose>-2 -2.05 1 0 0 0</pose><geometry><box><size>4.2 0.1 2</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+        <!-- west -->
+        <collision name="west_collision"><pose>-4.05 0 1 0 0 0</pose><geometry><box><size>0.1 4.2 2</size></box></geometry></collision>
+        <visual    name="west_visual"><pose>-4.05 0 1 0 0 0</pose><geometry><box><size>0.1 4.2 2</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Corridor north and south walls -->
+    <model name="corridor_walls">
+      <static>true</static>
+      <link name="link">
+        <collision name="north_collision"><pose>4  1.05 1 0 0 0</pose><geometry><box><size>8.1 0.1 2</size></box></geometry></collision>
+        <visual    name="north_visual"><pose>4  1.05 1 0 0 0</pose><geometry><box><size>8.1 0.1 2</size></box></geometry><material><ambient>0.9 0.9 0.9 1</ambient><diffuse>0.9 0.9 0.9 1</diffuse></material></visual>
+
+        <collision name="south_collision"><pose>4 -1.05 1 0 0 0</pose><geometry><box><size>8.1 0.1 2</size></box></geometry></collision>
+        <visual    name="south_visual"><pose>4 -1.05 1 0 0 0</pose><geometry><box><size>8.1 0.1 2</size></box></geometry><material><ambient>0.9 0.9 0.9 1</ambient><diffuse>0.9 0.9 0.9 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Right room outer shell except the west side, which is split around the door -->
+    <model name="right_room_walls">
+      <static>true</static>
+      <link name="link">
+        <!-- north -->
+        <collision name="north_collision"><pose>10  2.05 1 0 0 0</pose><geometry><box><size>4.2 0.1 2</size></box></geometry></collision>
+        <visual    name="north_visual"><pose>10  2.05 1 0 0 0</pose><geometry><box><size>4.2 0.1 2</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+        <!-- south -->
+        <collision name="south_collision"><pose>10 -2.05 1 0 0 0</pose><geometry><box><size>4.2 0.1 2</size></box></geometry></collision>
+        <visual    name="south_visual"><pose>10 -2.05 1 0 0 0</pose><geometry><box><size>4.2 0.1 2</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+        <!-- east -->
+        <collision name="east_collision"><pose>12.05 0 1 0 0 0</pose><geometry><box><size>0.1 4.2 2</size></box></geometry></collision>
+        <visual    name="east_visual"><pose>12.05 0 1 0 0 0</pose><geometry><box><size>0.1 4.2 2</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+        <!-- west wall upper segment -->
+        <collision name="west_upper_collision"><pose>7.95 1.5 1 0 0 0</pose><geometry><box><size>0.1 1.0 2</size></box></geometry></collision>
+        <visual    name="west_upper_visual"><pose>7.95 1.5 1 0 0 0</pose><geometry><box><size>0.1 1.0 2</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+        <!-- west wall lower segment -->
+        <collision name="west_lower_collision"><pose>7.95 -1.5 1 0 0 0</pose><geometry><box><size>0.1 1.0 2</size></box></geometry></collision>
+        <visual    name="west_lower_visual"><pose>7.95 -1.5 1 0 0 0</pose><geometry><box><size>0.1 1.0 2</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Door model. Hinge sits on the room wall at x=8, y=-0.45 -->
+    <model name="door">
+      <pose>8 -0.45 0 0 0 0</pose>
+      <static>false</static>
+
+      <link name="frame">
+        <kinematic>true</kinematic>
+      </link>
+
+      <link name="panel">
+        <pose>0 0 1 0 0 0</pose>
+        <inertial>
+          <mass>15.0</mass>
+          <inertia>
+            <ixx>1.0</ixx><iyy>1.0</iyy><izz>1.0</izz>
+            <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <pose>0 0.45 0 0 0 0</pose>
+          <geometry><box><size>0.05 0.9 2.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <pose>0 0.45 0 0 0 0</pose>
+          <geometry><box><size>0.05 0.9 2.0</size></box></geometry>
+          <material><ambient>0.55 0.27 0.07 1</ambient><diffuse>0.55 0.27 0.07 1</diffuse></material>
+        </visual>
+      </link>
+
+      <joint name="door_hinge" type="revolute">
+        <parent>frame</parent>
+        <child>panel</child>
+        <pose>0 0 1 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>0.0</lower>
+            <upper>1.5708</upper>
+          </limit>
+          <dynamics>
+            <damping>2.0</damping>
+            <friction>0.2</friction>
+          </dynamics>
+        </axis>
+      </joint>
+
+      <plugin name="proximity_door_controller" filename="libproximity_door_plugin.so">
+        <joint_name>door_hinge</joint_name>
+        <target_model>agent1</target_model>
+        <trigger_distance>1.6</trigger_distance>
+        <doorway_x>8.0</doorway_x>
+        <doorway_y>0.0</doorway_y>
+        <open_angle>1.35</open_angle>
+        <closed_angle>0.0</closed_angle>
+        <open_speed>1.2</open_speed>
+        <close_speed>0.6</close_speed>
+        <hold_open_time>1.5</hold_open_time>
+      </plugin>
+    </model>
+  </world>
+</sdf>

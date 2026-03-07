@@ -29,10 +29,6 @@
 #include <gazebo/util/system.hh>
 #include <gazebo/sensors/sensors.hh>
 #include <gazebo_ros/node.hpp>
-// #include <gazebo_msgs/msg/contact_state.hpp>
-// #include <gazebo_msgs/msg/contacts_state.hpp>
-// #include <gazebo_ros/conversions/builtin_interfaces.hpp>
-// #include <gazebo_ros/conversions/gazebo_msgs.hpp>
 #include <gazebo_ros/utils.hpp>
 #include <geometry_msgs/msg/wrench.hpp>
 #include <gazebo_collision_msgs/msg/collision.hpp>
