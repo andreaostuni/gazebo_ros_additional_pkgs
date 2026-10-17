@@ -59,6 +59,11 @@ public:
   std::string terrain_name_;
 
   /**
+   * @brief Scoped-name prefix of the model the sensor belongs to ("model::").
+   */
+  std::string model_prefix_;
+
+  /**
    * @brief ROS2 publisher for the contact topic.
    */
   rclcpp::Publisher<gazebo_collision_msgs::msg::Collision>::SharedPtr pub_; //gazeboROS
@@ -103,6 +108,10 @@ void CollisionPlugin::Load(gazebo::sensors::SensorPtr _sensor, sdf::ElementPtr _
 
   impl_->terrain_name_ = _sdf->Get<std::string>("terrain_name", "terrain").first;
 
+  // The sensor's parent is a link, scoped "model::link": keep "model::".
+  const std::string parent = impl_->parent_sensor_->ParentName();
+  impl_->model_prefix_ = parent.substr(0, parent.find("::")) + "::";
+
   impl_->update_connection_ = impl_->parent_sensor_->ConnectUpdated(
     std::bind(&CollisionPluginPrivate::OnUpdate, impl_.get()));
 
@@ -120,12 +129,23 @@ void CollisionPluginPrivate::OnUpdate()
   msg.header.frame_id = frame_name_;
   msg.header.stamp = node_->now();
 
-  // Remove the terrain from the collision list
+  // Report the body this model touched. Gazebo does not fix the order of a
+  // contact's two collisions, so collision2 is sometimes this model's own
+  // (a TB2 sensor reporting "turtlebot2::base_footprint::..." for a contact
+  // with another robot); take whichever of the two is not ours. A contact
+  // between two of our own bodies is not a collision with anything.
+  // Then remove the terrain from the collision list.
   std::for_each(
     contacts.contact().begin(), contacts.contact().end(),
-    [&](gazebo::msgs::Contact contact) {
-      if (contact.collision2().find(terrain_name_) == std::string::npos) {
-        objs_hit.push_back(contact.collision2());
+    [&](const gazebo::msgs::Contact & contact) {
+      const bool own1 = contact.collision1().rfind(model_prefix_, 0) == 0;
+      const bool own2 = contact.collision2().rfind(model_prefix_, 0) == 0;
+      if (own1 == own2) {
+        return;
+      }
+      const std::string & other = own1 ? contact.collision2() : contact.collision1();
+      if (other.find(terrain_name_) == std::string::npos) {
+        objs_hit.push_back(other);
       }
     });
 
